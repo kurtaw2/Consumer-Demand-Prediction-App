@@ -1,17 +1,22 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
 import xgboost as xgb
 import os
 
-# Explicit imports to ensure cloud compatibility
+# Explicit imports to ensure cloud compatibility and catch errors
+try:
+    import matplotlib.pyplot as plt
+except ImportError as e:
+    st.error(f"Critical Library Error: Matplotlib failed to import. {e}")
+    st.stop()
+
 try:
     from sklearn.ensemble import RandomForestRegressor
     from sklearn.model_selection import train_test_split, TimeSeriesSplit, cross_val_score, GridSearchCV
     from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 except ImportError as e:
-    st.error(f"Critical Library Error: {e}")
+    st.error(f"Critical Library Error: Scikit-learn failed to import. {e}")
     st.stop()
 
 # --- PAGE CONFIGURATION ---
