@@ -7,6 +7,16 @@ import numpy as np
 import os
 import matplotlib.pyplot as plt
 
+# --- DEPLOYMENT NOTE ---
+# If deploying to Streamlit Cloud, your requirements.txt must contain:
+# streamlit
+# pandas
+# numpy
+# scikit-learn  <-- CRITICAL: Use 'scikit-learn', NOT 'sklearn'
+# xgboost
+# matplotlib
+# pyarrow
+
 # --- Helper Function for CES Data Extraction (Dynamic Search) ---
 def extract_ces_indicator(file_path, indicator_search_term, new_column_name):
     """
