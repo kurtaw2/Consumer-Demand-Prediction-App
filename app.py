@@ -303,8 +303,6 @@ if hfce is not None:
         # For simplicity in this mock-up, we'll take the simple average of the last 4 *available* lags.
         
         in_roll4_calc = last_row.get('RollingMean_4', (in_lag1 + lag2_val + in_lag4 + in_lag4) / 4) # Fallback uses Lag1 and Lag4 as proxies
-        
-        st.info(f"Last Qtr Avg (Trend Proxy): ₱{in_roll4_calc:,.2f}")
 
         submit = st.form_submit_button("🚀 Predict Demand")
     
