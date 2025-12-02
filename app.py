@@ -100,7 +100,7 @@ def extract_ces_indicator(current_dir, file_name, search_term, col_name):
 def process_pipeline(hfce_df, pop_df, inflation_df, current_dir):
     # 1. Clean HFCE
     id_col = hfce_df.columns[0]
-    hfce_melt = hfce_df.melt(id_vars=id_col, var_name='Year_Column', value_name='Value')
+    hfce_melt = hfce_df.melt(id_vars=id_col, var_name='Original_Column', value_name='Value')
     hfce_target = hfce_melt[hfce_melt[id_col].astype(str).str.contains('Clothing and footwear', case=False, na=False)].copy()
     hfce_target = hfce_target.rename(columns={'Value': 'HFCE_Clothing_Footwear'})
 
@@ -113,17 +113,16 @@ def process_pipeline(hfce_df, pop_df, inflation_df, current_dir):
         if pd.notna(col_name):
             try:
                 val_str = str(col_name).strip()
-                if val_str.isdigit() and len(val_str) == 4: 
+                if val_str.isdigit() and len(val_str) == 4:
                     current_year = int(val_str)
             except: pass
         if current_year:
             col_to_year[col_name] = current_year
             col_to_quarter[col_name] = quarter_names[i % 4]
 
-    hfce_target['Year'] = hfce_target['Year_Column'].map(col_to_year)
-    hfce_target['Quarter'] = hfce_target['Year_Column'].map(col_to_quarter)
+    hfce_target['Year'] = hfce_target['Original_Column'].map(col_to_year)
+    hfce_target['Quarter'] = hfce_target['Original_Column'].map(col_to_quarter)
     
-    hfce_target.drop(columns=['Year_Column'], inplace=True)
     hfce_target['HFCE_Clothing_Footwear'] = pd.to_numeric(hfce_target['HFCE_Clothing_Footwear'].astype(str).str.replace(',', ''), errors='coerce')
     hfce_target.dropna(subset=['HFCE_Clothing_Footwear', 'Year', 'Quarter'], inplace=True)
     hfce_target['Year'] = hfce_target['Year'].astype(int)
@@ -169,7 +168,7 @@ def process_pipeline(hfce_df, pop_df, inflation_df, current_dir):
     data['RollingMean_2'] = data['HFCE_Per_Capita'].shift(1).rolling(window=2).mean()
     data['RollingMean_4'] = data['HFCE_Per_Capita'].shift(1).rolling(window=4).mean()
     
-    # Growth Rates (Safe Calculation)
+    # Growth Rates (Check if columns exist first to prevent crash)
     if 'Inflation_Rate' in data.columns:
         data['Inflation_Growth'] = data['Inflation_Rate'].pct_change()
     
@@ -198,31 +197,10 @@ if hfce is not None:
         df = process_pipeline(hfce, pop, infl, c_dir)
         
         target = 'HFCE_Per_Capita'
-        # Define features dynamically based on what exists in DF
-        exclude_cols = [target, 'HFCE_Clothing_Footwear', 'Quarterly_Population', 'Original_Column']
-        features = [c for c in df.columns if c not in exclude_cols]
+        features = [c for c in df.columns if c not in [target, 'HFCE_Clothing_Footwear', 'Quarterly_Population']]
         
         X = df[features]
         y = df[target]
-        
-        # --- FINAL DATA CLEANING SAFEGUARD ---
-        # Ensure absolutely all data passed to model is numeric
-        for col in X.columns:
-            # If column is object type (string), remove commas and convert
-            if X[col].dtype == object:
-                X[col] = X[col].astype(str).str.replace(',', '')
-            X[col] = pd.to_numeric(X[col], errors='coerce')
-            
-        # Do the same for target y
-        if y.dtype == object:
-            y = y.astype(str).str.replace(',', '')
-        y = pd.to_numeric(y, errors='coerce')
-        
-        # Drop any rows that failed conversion (became NaN)
-        # Combine temporarily to drop aligned rows
-        combined = pd.concat([X, y], axis=1).dropna()
-        X = combined[features]
-        y = combined[target]
         
         # Chronological Split
         split_idx = int(len(df) * 0.8)
@@ -230,7 +208,8 @@ if hfce is not None:
         y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
         
         # Train Random Forest
-        rf = RandomForestRegressor(n_estimators=200, max_depth=10, random_state=42)
+        rf = RandomForestRegressor(n_estimators=200, max_depth=10, min_samples_split=5, 
+                                   min_samples_leaf=2, random_state=42)
         rf.fit(X_train, y_train)
         y_pred_rf = rf.predict(X_test)
         
@@ -244,7 +223,7 @@ if hfce is not None:
         r2_xg = r2_score(y_test, y_pred_xg)
         
         if r2_rf > r2_xg:
-            best_model = rf
+            best_model = rfa
             best_name = "Random Forest"
             y_pred = y_pred_rf
             best_r2 = r2_rf
