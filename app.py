@@ -1,57 +1,71 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
 import xgboost as xgb
 import os
-from sklearn.model_selection import TimeSeriesSplit, cross_val_score
-from sklearn.ensemble import RandomForestRegressor
 
-# --- Page Config ---
-st.set_page_config(page_title="HFCE Prediction Tool", layout="wide")
+# Robust Import Handling
+try:
+    from sklearn.ensemble import RandomForestRegressor
+    from sklearn.model_selection import train_test_split, TimeSeriesSplit, cross_val_score, GridSearchCV
+    from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+except ImportError as e:
+    st.error(f"Critical Library Error: {e}")
+    st.stop()
 
-st.title("👕 HFCE Clothing Consumption Predictor")
+# --- PAGE CONFIGURATION ---
+st.set_page_config(page_title="Textile Demand Predictor", layout="wide")
+
+st.title("🤖 AI Textile Demand Prediction System")
 st.markdown("""
-**Forecast Tool:** Predicts **Household Final Consumption Expenditure (Per Capita)** for Clothing & Footwear.
-*Note: Inputs are auto-filled with the latest available data from your files to ensure correct scaling.*
+This application uses **Random Forest** and **XGBoost** to forecast per-capita spending on clothing in the Philippines.
+It processes raw economic data (Inflation, HFCE, Population, CES) to predict future demand.
 """)
 
-# --- Configuration ---
-DATA_FOLDER = '.' 
-FILES = {
-    'hfce': os.path.join(DATA_FOLDER, 'HFCE_data.csv'),
-    'pop': os.path.join(DATA_FOLDER, 'Population_data.csv'),
-    'inf': os.path.join(DATA_FOLDER, 'Inflation_data.csv'),
-    'ces1': os.path.join(DATA_FOLDER, 'CES_Tab_1.csv'),
-    'ces3': os.path.join(DATA_FOLDER, 'CES_Tab_3.csv'),
-    'ces4': os.path.join(DATA_FOLDER, 'CES_Tab_4.csv'),
-}
+# --- DATA LOADING & PROCESSING ---
+@st.cache_data
+def load_data():
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    def get_path(filename): return os.path.join(current_dir, filename)
 
-# --- Helper Functions (Data Loading) ---
-
-def extract_ces_indicator(file_path, indicator_search_term, new_column_name):
     try:
+        hfce_df = pd.read_csv(get_path('HFCE_data.csv'), header=8, encoding='latin1')
+        pop_df = pd.read_csv(get_path('Population_data.csv'), encoding='latin1')
+        inflation_df = pd.read_csv(get_path('Inflation_data.csv'), encoding='latin1')
+        return hfce_df, pop_df, inflation_df, current_dir
+    except FileNotFoundError as e:
+        st.error(f"Missing File Error: {e}")
+        return None, None, None, None
+
+def extract_ces_indicator(current_dir, file_name, search_term, col_name):
+    try:
+        file_path = os.path.join(current_dir, file_name)
         if not os.path.exists(file_path): return pd.DataFrame()
-        df_raw = pd.read_csv(file_path, header=None, encoding='latin1')  
+        df_raw = pd.read_csv(file_path, header=None, encoding='latin1')
         
         quarter_row_idx = None
         for idx, row in df_raw.iterrows():
-            if 'Q1' in " ".join(row.astype(str).values) and 'Q3' in " ".join(row.astype(str).values):
+            row_text = " ".join(row.astype(str).values)
+            if 'Q1' in row_text and 'Q2' in row_text:
                 quarter_row_idx = idx
                 break
         if quarter_row_idx is None: return pd.DataFrame()
-        
+
         year_row_idx = quarter_row_idx - 1
         indicator_row_idx = None
         
-        if indicator_search_term == 'ROW_0_fallback':
-             for idx in range(quarter_row_idx + 1, min(quarter_row_idx + 20, len(df_raw))):
-                 try:
-                     val_str = str(df_raw.iloc[idx, 2]).replace(',', '').strip()
-                     if val_str and val_str.lower() != 'nan':
-                         float(val_str)
-                         indicator_row_idx = idx
-                         break
-                 except: continue
+        if search_term == 'ROW_0_fallback':
+            # Scan up to 50 rows to find valid numeric data
+            for idx in range(quarter_row_idx + 1, min(quarter_row_idx + 50, len(df_raw))):
+                try:
+                    # Check column 2 (index 2) which usually holds Q1 data
+                    test_val = str(df_raw.iloc[idx, 2]).replace(',', '').strip()
+                    if test_val and test_val.lower() != 'nan':
+                        float(test_val) # Try converting to float
+                        indicator_row_idx = idx
+                        break
+                except: continue
         
         if indicator_row_idx is None: return pd.DataFrame()
 
@@ -59,253 +73,259 @@ def extract_ces_indicator(file_path, indicator_search_term, new_column_name):
         year_row = df_raw.iloc[year_row_idx]
         data_row = df_raw.iloc[indicator_row_idx]
 
-        dates = []
-        values = []
+        dates, values = [], []
         current_year = None
-
         for col_idx in range(1, len(df_raw.columns)):
             val_year = year_row[col_idx]
             if pd.notna(val_year):
                 try:
-                    s = str(val_year).strip().replace(',', '').replace('.0', '')
-                    if s.isdigit() and len(s) == 4: current_year = int(s)
+                    year_str = str(val_year).strip().replace(',', '').replace('.0', '')
+                    if year_str.isdigit() and len(year_str) == 4: current_year = int(year_str)
                 except: pass
             
             val_qtr = quarter_row[col_idx]
             val_data = data_row[col_idx]
-
-            if pd.notna(val_qtr) and pd.notna(val_data) and current_year is not None:
-                if str(val_qtr).strip() in ['Q1', 'Q2', 'Q3', 'Q4']:
-                    dates.append((current_year, str(val_qtr).strip()))
+            if pd.notna(val_qtr) and pd.notna(val_data) and current_year:
+                qtr_str = str(val_qtr).strip()
+                if qtr_str in ['Q1', 'Q2', 'Q3', 'Q4']:
+                    dates.append((current_year, qtr_str))
                     values.append(val_data)
 
-        df_cleaned = pd.DataFrame(dates, columns=['Year', 'Quarter'])
-        df_cleaned[new_column_name] = pd.to_numeric(pd.Series(values).astype(str).str.replace(',', ''), errors='coerce')
-        df_cleaned.dropna(inplace=True)
-        return df_cleaned
+        df_clean = pd.DataFrame(dates, columns=['Year', 'Quarter'])
+        df_clean[col_name] = pd.to_numeric(pd.Series(values).astype(str).str.replace(',', ''), errors='coerce')
+        return df_clean.dropna()
     except: return pd.DataFrame()
 
 @st.cache_data
-def train_model():
-    # 1. Load Files
-    try:
-        hfce_df = pd.read_csv(FILES['hfce'], header=8, encoding='latin1')
-        pop_df = pd.read_csv(FILES['pop'], encoding='latin1')
-        inf_df = pd.read_csv(FILES['inf'], encoding='latin1')
-    except Exception as e:
-        st.error(f"Error loading files: {e}")
-        return None, None, None
-
-    # 2. Clean HFCE
+def process_pipeline(hfce_df, pop_df, inflation_df, current_dir):
+    # 1. Clean HFCE
     id_col = hfce_df.columns[0]
-    hfce_melt = hfce_df.melt(id_vars=id_col, var_name='Year', value_name='Value')
+    hfce_melt = hfce_df.melt(id_vars=id_col, var_name='Year_Column', value_name='Value')
     hfce_target = hfce_melt[hfce_melt[id_col].astype(str).str.contains('Clothing and footwear', case=False, na=False)].copy()
-    
-    year_map = {}
+    hfce_target = hfce_target.rename(columns={'Value': 'HFCE_Clothing_Footwear'})
+
+    col_to_year = {}
+    col_to_quarter = {}
     current_year = None
-    for col_idx, col_value in enumerate(hfce_df.columns[1:]):
-        if pd.notna(col_value):
-            s = str(col_value).strip()
-            if s.isdigit() and len(s)==4: current_year = int(s)
-        year_map[col_idx + 1] = current_year
-    
-    # Extract Year/Quarter
-    rows = []
     quarter_names = ['Q1', 'Q2', 'Q3', 'Q4']
-    for i, row in hfce_target.iterrows():
-        col_idx = hfce_df.columns.get_loc(row['Year'])
-        y = year_map.get(col_idx)
-        q = quarter_names[(col_idx - 1) % 4]
-        if y is not None:
-            rows.append({'Year': y, 'Quarter': q, 'Value': row['Value']})
 
-    clean_hfce = pd.DataFrame(rows)
-    # Scale: Assuming HFCE is in Millions, multiply by 1M to get actual Pesos
-    clean_hfce['HFCE_Clothing_Footwear'] = pd.to_numeric(clean_hfce['Value'].astype(str).str.replace(',', ''), errors='coerce') * 1_000_000
-    clean_hfce.dropna(inplace=True)
+    for i, col_name in enumerate(hfce_df.columns[1:]):
+        if pd.notna(col_name):
+            try:
+                val_str = str(col_name).strip()
+                if val_str.isdigit() and len(val_str) == 4: 
+                    current_year = int(val_str)
+            except: pass
+        if current_year:
+            col_to_year[col_name] = current_year
+            col_to_quarter[col_name] = quarter_names[i % 4]
 
-    # 3. Clean Population
-    pop_df['Quarterly_Population'] = pd.to_numeric(pop_df['Interpolated Quarterly Estimate'].astype(str).str.replace(',', ''), errors='coerce')
+    hfce_target['Year'] = hfce_target['Year_Column'].map(col_to_year)
+    hfce_target['Quarter'] = hfce_target['Year_Column'].map(col_to_quarter)
+    
+    hfce_target.drop(columns=['Year_Column'], inplace=True)
+    hfce_target['HFCE_Clothing_Footwear'] = pd.to_numeric(hfce_target['HFCE_Clothing_Footwear'].astype(str).str.replace(',', ''), errors='coerce')
+    hfce_target.dropna(subset=['HFCE_Clothing_Footwear', 'Year', 'Quarter'], inplace=True)
+    hfce_target['Year'] = hfce_target['Year'].astype(int)
+    hfce_target['HFCE_Clothing_Footwear'] = hfce_target['HFCE_Clothing_Footwear'] * 1_000_000 
+
+    # 2. Clean Population
+    pop_df = pop_df.rename(columns={'Annual Population Source': 'Annual_Population_Source', 'Interpolated Quarterly Estimate': 'Quarterly_Population'})
+    pop_df['Quarterly_Population'] = pd.to_numeric(pop_df['Quarterly_Population'].astype(str).str.replace(',', ''), errors='coerce')
     pop_df.dropna(subset=['Quarterly_Population'], inplace=True)
     pop_df['Year'].ffill(inplace=True)
-    pop_df['Quarter'] = pop_df.groupby('Year').cumcount().apply(lambda x: f'Q{x%4+1}')
-    
-    # 4. Clean Inflation
-    inf_df.columns = ['Year', 'Quarter_Int', 'Inflation_Annual_Static_Rate']
-    inf_df['Quarter'] = inf_df['Quarter_Int'].apply(lambda x: f'Q{int(x)}')
-    inf_df['Year'] = pd.to_numeric(inf_df['Year'], errors='coerce')
-    
-    # 5. CES
-    df_ccis = extract_ces_indicator(FILES['ces1'], 'ROW_0_fallback', 'CCIS_Overall')
-    df_fin = extract_ces_indicator(FILES['ces3'], 'ROW_0_fallback', 'CES_FinCondition')
-    df_inc = extract_ces_indicator(FILES['ces4'], 'ROW_0_fallback', 'CES_Income')
+    pop_df['Quarter'] = pop_df.groupby('Year').cumcount().apply(lambda x: 'Q' + str(x % 4 + 1))
+    pop_df['Year'] = pop_df['Year'].astype(int)
 
-    # 6. Merge
-    data = pd.merge(clean_hfce[['Year','Quarter','HFCE_Clothing_Footwear']], pop_df[['Year','Quarter','Quarterly_Population']], on=['Year','Quarter'], how='inner')
-    for d in [df_ccis, df_fin, df_inc]:
-        if not d.empty: data = pd.merge(data, d, on=['Year','Quarter'], how='left')
-    data = pd.merge(data, inf_df[['Year','Quarter','Inflation_Annual_Static_Rate']], on=['Year','Quarter'], how='left')
+    # 3. Clean Inflation
+    inflation_df.columns = ['Year', 'Quarter_Int', 'Inflation_Rate']
+    inflation_df['Quarter'] = inflation_df['Quarter_Int'].apply(lambda x: f'Q{int(x)}')
+    inflation_df['Year'] = pd.to_numeric(inflation_df['Year'], errors='coerce')
+    inflation_df = inflation_df[['Year', 'Quarter', 'Inflation_Rate']].dropna()
 
-    # 7. Engineering
-    data = data.sort_values(by=['Year', 'Quarter']).fillna(method='ffill').fillna(0)
-    data = data[data['Quarterly_Population'] > 0]
+    # 4. Extract CES
+    df_ccis = extract_ces_indicator(current_dir, 'CES_Tab_1.csv', 'ROW_0_fallback', 'CCIS_Overall')
+    df_fin = extract_ces_indicator(current_dir, 'CES_Tab_3.csv', 'ROW_0_fallback', 'CES_FinCondition')
+    df_inc = extract_ces_indicator(current_dir, 'CES_Tab_4.csv', 'ROW_0_fallback', 'CES_Income')
+
+    # 5. Merge
+    data = pd.merge(hfce_target, pop_df, on=['Year', 'Quarter'], how='inner')
+    for df in [df_ccis, df_fin, df_inc]:
+        if not df.empty:
+            data = pd.merge(data, df, on=['Year', 'Quarter'], how='left')
+    data = pd.merge(data, inflation_df, on=['Year', 'Quarter'], how='left')
+
+    # 6. Feature Engineering
+    data = data[data['Year'] >= 2007].sort_values(by=['Year', 'Quarter'])
+    data.fillna(method='ffill', inplace=True)
+    data.fillna(method='bfill', inplace=True)
+    
     data['HFCE_Per_Capita'] = data['HFCE_Clothing_Footwear'] / data['Quarterly_Population']
     
+    # Lags & Rolling
     data['HFCE_Lag1'] = data['HFCE_Per_Capita'].shift(1)
     data['HFCE_Lag2'] = data['HFCE_Per_Capita'].shift(2)
     data['HFCE_Lag4'] = data['HFCE_Per_Capita'].shift(4)
-    data['HFCE_RollingMean_2'] = data['HFCE_Per_Capita'].shift(1).rolling(window=2).mean()
-    data['HFCE_RollingMean_4'] = data['HFCE_Per_Capita'].shift(1).rolling(window=4).mean()
-    data['Inflation_Growth'] = data['Inflation_Annual_Static_Rate'].pct_change()
-    data['CCIS_Growth'] = data['CCIS_Overall'].pct_change()
+    data['RollingMean_2'] = data['HFCE_Per_Capita'].shift(1).rolling(window=2).mean()
+    data['RollingMean_4'] = data['HFCE_Per_Capita'].shift(1).rolling(window=4).mean()
     
+    # Growth Rates (Safe Calculation)
+    if 'Inflation_Rate' in data.columns:
+        data['Inflation_Growth'] = data['Inflation_Rate'].pct_change()
+    
+    if 'CCIS_Overall' in data.columns:
+        data['CCIS_Growth'] = data['CCIS_Overall'].pct_change()
+        
     data.replace([np.inf, -np.inf], 0, inplace=True)
-    
-    # We keep the LAST row (even if it has NaNs in future targets) to use as default inputs
-    last_known_data = data.iloc[-1].copy()
-    
+
     data.dropna(inplace=True)
     
-    # 8. ML
-    y = data['HFCE_Per_Capita']
-    X = data.drop(columns=['HFCE_Per_Capita', 'HFCE_Clothing_Footwear', 'Quarterly_Population', 'Value'], errors='ignore')
-    if 'Unnamed: 0' in X.columns: X.drop(columns=['Unnamed: 0'], inplace=True)
+    # One-Hot Encoding
+    data = pd.get_dummies(data, columns=['Quarter'], drop_first=False)
     
-    X = pd.get_dummies(X, columns=['Quarter'], drop_first=True)
-    for col in X.columns: X[col] = pd.to_numeric(X[col], errors='coerce')
+    # Safe drop of 'Unnamed: 0' and 'Original_Column' if they exist
+    cols_to_drop = ['Unnamed: 0', 'Original_Column']
+    data.drop(columns=[c for c in cols_to_drop if c in data.columns], inplace=True)
     
-    # Reduced max_depth to prevent overfitting on small data
-    model = xgb.XGBRegressor(n_estimators=100, learning_rate=0.1, max_depth=3, random_state=42)
-    model.fit(X, y)
-    
-    return model, X.columns.tolist(), last_known_data
+    return data
 
-# --- Main Logic ---
+# --- MAIN APP LOGIC ---
 
-with st.spinner("Initializing Model & Loading Data..."):
-    model, feature_cols, last_data = train_model()
+hfce, pop, infl, c_dir = load_data()
 
-if model is None:
-    st.error("⚠️ Error loading data. Please check CSV files.")
-    st.stop()
-
-# --- INPUT FORM ---
-st.markdown("---")
-st.header("1. Define Forecast Scenario")
-
-# Use LAST KNOWN DATA as defaults to prevent scale errors
-def_year = int(last_data['Year'])
-def_ccis = float(last_data.get('CCIS_Overall', 0))
-def_fin = float(last_data.get('CES_FinCondition', 0))
-def_inc = float(last_data.get('CES_Income', 0))
-def_inf = float(last_data.get('Inflation_Annual_Static_Rate', 4.0))
-# Lags: The most recent 'Per Capita' value is the Lag1 for the prediction
-def_lag1 = float(last_data['HFCE_Per_Capita']) 
-def_lag2 = float(last_data['HFCE_Lag1']) # The previous lag1 is now lag2
-def_lag4 = float(last_data['HFCE_Lag4']) # Rough approximation for UI defaults
-
-with st.form("prediction_form"):
-    st.info(f"💡 **System Check:** The average spending per person in the training data is **₱{def_lag1:,.2f}**. Input values have been auto-set to this scale.")
-
-    st.subheader("Step 1: Timeframe")
-    c1, c2 = st.columns(2)
-    with c1:
-        input_year = st.number_input("Target Year", min_value=2024, max_value=2030, value=def_year + 1)
-    with c2:
-        input_qtr = st.selectbox("Target Quarter", ["Q1", "Q2", "Q3", "Q4"])
-
-    st.subheader("Step 2: Economic Indicators")
-    ec1, ec2, ec3 = st.columns(3)
-    with ec1:
-        val_ccis = st.number_input("Consumer Confidence (CCIS)", value=def_ccis)
-    with ec2:
-        val_fin = st.number_input("Financial Condition Index", value=def_fin)
-    with ec3:
-        val_inc = st.number_input("Income Outlook Index", value=def_inc)
-
-    st.markdown("#### Inflation")
-    inf1, inf2 = st.columns(2)
-    with inf1:
-        val_inf_curr = st.number_input("Inflation Rate (Target Qtr) %", value=def_inf)
-    with inf2:
-        val_inf_prev = st.number_input("Inflation Rate (Previous Qtr) %", value=def_inf, help="Used for growth rate calc")
-
-    st.subheader("Step 3: Historical Context (Crucial)")
-    st.caption("These define the 'Trend'. Defaults are set to the most recent known data.")
-    
-    hist1, hist2, hist3 = st.columns(3)
-    with hist1:
-        lag1 = st.number_input("Last Qtr Consumption (Lag 1)", value=def_lag1, format="%.2f")
-    with hist2:
-        lag2 = st.number_input("2 Qtrs Ago Consumption (Lag 2)", value=def_lag2, format="%.2f")
-    with hist3:
-        lag4 = st.number_input("1 Year Ago Consumption (Lag 4)", value=def_lag4, format="%.2f")
-
-    st.markdown("---")
-    submit_btn = st.form_submit_button("🚀 Generate Prediction", type="primary")
-
-# 3. Prediction Logic
-if submit_btn:
-    input_data = {}
-    
-    # Inputs
-    input_data['Year'] = input_year
-    input_data['CCIS_Overall'] = val_ccis
-    input_data['CES_FinCondition'] = val_fin
-    input_data['CES_Income'] = val_inc
-    input_data['Inflation_Annual_Static_Rate'] = val_inf_curr
-    
-    # Lags
-    input_data['HFCE_Lag1'] = lag1
-    input_data['HFCE_Lag2'] = lag2
-    input_data['HFCE_Lag4'] = lag4
-    
-    # Calc
-    input_data['HFCE_RollingMean_2'] = (lag1 + lag2) / 2
-    input_data['HFCE_RollingMean_4'] = (lag1 + lag2 + lag4 + lag4) / 4 
-    input_data['Inflation_Growth'] = (val_inf_curr - val_inf_prev) / val_inf_prev if val_inf_prev != 0 else 0
-    input_data['CCIS_Growth'] = 0.0 
-
-    # Quarter One-Hot
-    input_data['Quarter_Q2'] = 1 if input_qtr == 'Q2' else 0
-    input_data['Quarter_Q3'] = 1 if input_qtr == 'Q3' else 0
-    input_data['Quarter_Q4'] = 1 if input_qtr == 'Q4' else 0
-    
-    # Build DataFrame
-    df_input = pd.DataFrame([input_data])
-    df_final = pd.DataFrame(0, index=[0], columns=feature_cols)
-    
-    for col in feature_cols:
-        if col in df_input.columns:
-            df_final.loc[0, col] = df_input.loc[0, col]
+if hfce is not None:
+    with st.spinner('Training models...'):
+        df = process_pipeline(hfce, pop, infl, c_dir)
+        
+        target = 'HFCE_Per_Capita'
+        # Define features dynamically based on what exists in DF
+        exclude_cols = [target, 'HFCE_Clothing_Footwear', 'Quarterly_Population', 'Original_Column']
+        features = [c for c in df.columns if c not in exclude_cols]
+        
+        X = df[features]
+        y = df[target]
+        
+        # --- FINAL DATA CLEANING SAFEGUARD ---
+        # Ensure absolutely all data passed to model is numeric
+        for col in X.columns:
+            # If column is object type (string), remove commas and convert
+            if X[col].dtype == object:
+                X[col] = X[col].astype(str).str.replace(',', '')
+            X[col] = pd.to_numeric(X[col], errors='coerce')
             
-    # FORCE FLOAT to fix XGBoost error
-    df_final = df_final.astype(float)
-            
-    prediction = model.predict(df_final)[0]
-    
-    st.header("2. Prediction Results")
-    with st.container():
-        res_col1, res_col2 = st.columns([1, 2])
-        with res_col1:
-            st.metric(
-                label="Predicted Spending (Per Capita)", 
-                value=f"₱ {prediction:,.2f}",
-                delta=f"{((prediction - lag1)/lag1)*100:.2f}% vs Last Qtr"
-            )
-        with res_col2:
-            st.info(f"The model predicts spending of **₱{prediction:,.2f}** per person given the economic conditions.")
+        # Do the same for target y
+        if y.dtype == object:
+            y = y.astype(str).str.replace(',', '')
+        y = pd.to_numeric(y, errors='coerce')
+        
+        # Drop any rows that failed conversion (became NaN)
+        # Combine temporarily to drop aligned rows
+        combined = pd.concat([X, y], axis=1).dropna()
+        X = combined[features]
+        y = combined[target]
+        
+        # Chronological Split
+        split_idx = int(len(df) * 0.8)
+        X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
+        y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
+        
+        # Train Random Forest
+        rf = RandomForestRegressor(n_estimators=200, max_depth=10, random_state=42)
+        rf.fit(X_train, y_train)
+        y_pred_rf = rf.predict(X_test)
+        
+        # Train XGBoost
+        xg = xgb.XGBRegressor(n_estimators=100, learning_rate=0.1, max_depth=5, random_state=42)
+        xg.fit(X_train, y_train)
+        y_pred_xg = xg.predict(X_test)
+        
+        # Select Best Model
+        r2_rf = r2_score(y_test, y_pred_rf)
+        r2_xg = r2_score(y_test, y_pred_xg)
+        
+        if r2_rf > r2_xg:
+            best_model = rf
+            best_name = "Random Forest"
+            y_pred = y_pred_rf
+            best_r2 = r2_rf
+        else:
+            best_model = xg
+            best_name = "XGBoost"
+            y_pred = y_pred_xg
+            best_r2 = r2_xg
 
-elif model:
-    st.markdown("---")
-    st.subheader("ℹ️ About this Project")
-    st.markdown("This app predicts discretionary spending on **Clothing & Footwear** based on economic data.")
+    # --- DASHBOARD ---
+    col1, col2, col3 = st.columns(3)
+    col1.metric("🏆 Best Model", best_name)
+    col2.metric("Accuracy (R²)", f"{best_r2:.2%}")
+    col3.metric("Avg Error (MAE)", f"₱{mean_absolute_error(y_test, y_pred):.2f}")
     
-    col1, col2 = st.columns(2)
-    with col1:
-        st.write("**Recent Data Snapshot:**")
-        st.write(f"Most Recent Year: {int(last_data['Year'])}")
-        st.write(f"Last Known Spending: ₱{last_data['HFCE_Per_Capita']:,.2f}")
-    with col2:
-        st.write("**Model:** XGBoost Regressor")
-        st.write("**Data Sources:** PSA, BSP")
+    st.subheader("📊 Forecast vs. Actual (Test Set)")
+    chart_data = pd.DataFrame({
+        'Actual Spending': y_test.values,
+        'Predicted Spending': y_pred
+    })
+    st.line_chart(chart_data)
+    
+    st.subheader("🔮 Demand Simulator")
+    st.info("Enter economic data to predict clothing spending for the **next quarter**.")
+    
+    # Get last known data for defaults
+    if not X.empty:
+        last_row = X.iloc[-1]
+        last_val_infl = float(last_row['Inflation_Rate']) if 'Inflation_Rate' in last_row else 5.0
+        last_val_ccis = float(last_row['CCIS_Overall']) if 'CCIS_Overall' in last_row else -10.0
+        last_val_lag = float(last_row['HFCE_Lag1']) if 'HFCE_Lag1' in last_row else 1500.0
+    else:
+        last_val_infl = 5.0
+        last_val_ccis = -10.0
+        last_val_lag = 1500.0
+
+    with st.form("prediction_form"):
+        c1, c2, c3 = st.columns(3)
+        in_infl = c1.number_input("Inflation Rate (%)", value=last_val_infl, step=0.1)
+        in_ccis = c2.number_input("Consumer Confidence Index", value=last_val_ccis, step=0.1)
+        in_lag1 = c3.number_input("Prev Quarter Spending (₱)", value=last_val_lag, step=50.0)
+        
+        q_select = st.selectbox("Target Quarter", ["Q1 (Jan-Mar)", "Q2 (Apr-Jun)", "Q3 (Jul-Sep)", "Q4 (Oct-Dec)"])
+        submit = st.form_submit_button("🚀 Predict Demand")
+    
+    if submit:
+        # Construct input
+        input_vector = last_row.copy()
+        
+        # Update available fields safely
+        if 'Inflation_Rate' in input_vector: input_vector['Inflation_Rate'] = in_infl
+        if 'CCIS_Overall' in input_vector: input_vector['CCIS_Overall'] = in_ccis
+        if 'HFCE_Lag1' in input_vector: input_vector['HFCE_Lag1'] = in_lag1
+        
+        # Set Seasonality
+        input_vector['Quarter_Q1'] = 1 if "Q1" in q_select else 0
+        input_vector['Quarter_Q2'] = 1 if "Q2" in q_select else 0
+        input_vector['Quarter_Q3'] = 1 if "Q3" in q_select else 0
+        input_vector['Quarter_Q4'] = 1 if "Q4" in q_select else 0
+        
+        pred = best_model.predict(pd.DataFrame([input_vector]))[0]
+        
+        st.markdown("---")
+        st.success(f"### 🎯 Forecast: **₱{pred:,.2f}** per person")
+        
+        # Contextual Insight
+        pct_change = ((pred - in_lag1) / in_lag1) * 100
+        st.caption(f"This represents a **{pct_change:+.1f}%** change from the previous quarter.")
+        
+    # Feature Importance Plot
+    st.markdown("---")
+    st.subheader(f"🔍 Feature Importance ({best_name})")
+    importance = pd.DataFrame({
+        'Feature': features,
+        'Importance': best_model.feature_importances_
+    }).sort_values(by='Importance', ascending=True)
+    
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.barh(importance['Feature'], importance['Importance'], color='teal')
+    ax.set_xlabel("Importance Score")
+    st.pyplot(fig)
+
+else:
+    st.error("Data load failed. Please check CSV files.")
