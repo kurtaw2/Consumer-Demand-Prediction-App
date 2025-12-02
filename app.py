@@ -1,32 +1,26 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
+import xgboost as xgb
 import os
 
 # Robust Import Handling
 try:
-    import matplotlib.pyplot as plt
-except ImportError:
-    st.error("Critical Error: Matplotlib is missing. Please check requirements.txt")
-    st.stop()
-
-try:
-    import xgboost as xgb
     from sklearn.ensemble import RandomForestRegressor
-    from sklearn.model_selection import train_test_split, GridSearchCV
+    from sklearn.model_selection import train_test_split, TimeSeriesSplit, cross_val_score, GridSearchCV
     from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 except ImportError as e:
-    st.error(f"Import Error: {e}")
-    st.info("Debugging Hint: Ensure 'scikit-learn' (not 'sklearn') and 'xgboost' are in requirements.txt")
+    st.error(f"Critical Library Error: {e}")
     st.stop()
 
 # --- PAGE CONFIGURATION ---
-st.set_page_config(page_title="Textile Demand Forecaster", layout="centered")
+st.set_page_config(page_title="Textile Demand Predictor", layout="wide")
 
-st.title("🔮 Future Textile Demand Forecaster")
+st.title("🤖 AI Textile Demand Prediction System")
 st.markdown("""
-**Predict Per-Capita Clothing Spending** based on economic indicators.
-Enter your economic outlook below to forecast demand for the next quarter.
+This application uses **Random Forest** and **XGBoost** to forecast per-capita spending on clothing in the Philippines.
+It processes raw economic data (Inflation, HFCE, Population, CES) to predict future demand.
 """)
 
 # --- DATA LOADING & PROCESSING ---
@@ -40,7 +34,8 @@ def load_data():
         pop_df = pd.read_csv(get_path('Population_data.csv'), encoding='latin1')
         inflation_df = pd.read_csv(get_path('Inflation_data.csv'), encoding='latin1')
         return hfce_df, pop_df, inflation_df, current_dir
-    except FileNotFoundError:
+    except FileNotFoundError as e:
+        st.error(f"Missing File Error: {e}")
         return None, None, None, None
 
 def extract_ces_indicator(current_dir, file_name, search_term, col_name):
@@ -55,18 +50,19 @@ def extract_ces_indicator(current_dir, file_name, search_term, col_name):
             if 'Q1' in row_text and 'Q2' in row_text:
                 quarter_row_idx = idx
                 break
-        
         if quarter_row_idx is None: return pd.DataFrame()
 
         year_row_idx = quarter_row_idx - 1
         indicator_row_idx = None
+        
         if search_term == 'ROW_0_fallback':
+            # Scan up to 50 rows to find valid numeric data
             for idx in range(quarter_row_idx + 1, min(quarter_row_idx + 50, len(df_raw))):
                 try:
-                    # Check 3rd column (index 2) usually holds Q1 data
+                    # Check column 2 (index 2) which usually holds Q1 data
                     test_val = str(df_raw.iloc[idx, 2]).replace(',', '').strip()
                     if test_val and test_val.lower() != 'nan':
-                        float(test_val)
+                        float(test_val) # Try converting to float
                         indicator_row_idx = idx
                         break
                 except: continue
@@ -104,7 +100,7 @@ def extract_ces_indicator(current_dir, file_name, search_term, col_name):
 def process_pipeline(hfce_df, pop_df, inflation_df, current_dir):
     # 1. Clean HFCE
     id_col = hfce_df.columns[0]
-    hfce_melt = hfce_df.melt(id_vars=id_col, var_name='Original_Column', value_name='Value')
+    hfce_melt = hfce_df.melt(id_vars=id_col, var_name='Year_Column', value_name='Value')
     hfce_target = hfce_melt[hfce_melt[id_col].astype(str).str.contains('Clothing and footwear', case=False, na=False)].copy()
     hfce_target = hfce_target.rename(columns={'Value': 'HFCE_Clothing_Footwear'})
 
@@ -113,30 +109,24 @@ def process_pipeline(hfce_df, pop_df, inflation_df, current_dir):
     current_year = None
     quarter_names = ['Q1', 'Q2', 'Q3', 'Q4']
 
-    # Build mapping from original column names
     for i, col_name in enumerate(hfce_df.columns[1:]):
         if pd.notna(col_name):
             try:
                 val_str = str(col_name).strip()
-                if val_str.isdigit() and len(val_str) == 4:
+                if val_str.isdigit() and len(val_str) == 4: 
                     current_year = int(val_str)
             except: pass
         if current_year:
             col_to_year[col_name] = current_year
             col_to_quarter[col_name] = quarter_names[i % 4]
 
-    # Apply Map
-    hfce_target['Year'] = hfce_target['Original_Column'].map(col_to_year)
-    hfce_target['Quarter'] = hfce_target['Original_Column'].map(col_to_quarter)
+    hfce_target['Year'] = hfce_target['Year_Column'].map(col_to_year)
+    hfce_target['Quarter'] = hfce_target['Year_Column'].map(col_to_quarter)
     
-    hfce_target.drop(columns=['Original_Column'], inplace=True)
-    
-    # Numeric Conversion
+    hfce_target.drop(columns=['Year_Column'], inplace=True)
     hfce_target['HFCE_Clothing_Footwear'] = pd.to_numeric(hfce_target['HFCE_Clothing_Footwear'].astype(str).str.replace(',', ''), errors='coerce')
     hfce_target.dropna(subset=['HFCE_Clothing_Footwear', 'Year', 'Quarter'], inplace=True)
     hfce_target['Year'] = hfce_target['Year'].astype(int)
-    
-    # --- SCALE HFCE (Millions -> Actual Pesos) ---
     hfce_target['HFCE_Clothing_Footwear'] = hfce_target['HFCE_Clothing_Footwear'] * 1_000_000 
 
     # 2. Clean Population
@@ -179,13 +169,13 @@ def process_pipeline(hfce_df, pop_df, inflation_df, current_dir):
     data['RollingMean_2'] = data['HFCE_Per_Capita'].shift(1).rolling(window=2).mean()
     data['RollingMean_4'] = data['HFCE_Per_Capita'].shift(1).rolling(window=4).mean()
     
-    # Growth Rates (Safe Calculation with Column Checks)
+    # Growth Rates (Safe Calculation)
     if 'Inflation_Rate' in data.columns:
         data['Inflation_Growth'] = data['Inflation_Rate'].pct_change()
     
     if 'CCIS_Overall' in data.columns:
         data['CCIS_Growth'] = data['CCIS_Overall'].pct_change()
-    
+        
     data.replace([np.inf, -np.inf], 0, inplace=True)
 
     data.dropna(inplace=True)
@@ -218,108 +208,124 @@ if hfce is not None:
         # --- FINAL DATA CLEANING SAFEGUARD ---
         # Ensure absolutely all data passed to model is numeric
         for col in X.columns:
+            # If column is object type (string), remove commas and convert
             if X[col].dtype == object:
                 X[col] = X[col].astype(str).str.replace(',', '')
             X[col] = pd.to_numeric(X[col], errors='coerce')
             
+        # Do the same for target y
         if y.dtype == object:
             y = y.astype(str).str.replace(',', '')
         y = pd.to_numeric(y, errors='coerce')
         
+        # Drop any rows that failed conversion (became NaN)
+        # Combine temporarily to drop aligned rows
         combined = pd.concat([X, y], axis=1).dropna()
         X = combined[features]
         y = combined[target]
         
-        # Train Random Forest (We don't need GridSearchCV here for speed)
-        rf = RandomForestRegressor(n_estimators=200, max_depth=10, min_samples_split=5, min_samples_leaf=2, random_state=42)
-        rf.fit(X, y)
+        # Chronological Split
+        split_idx = int(len(df) * 0.8)
+        X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
+        y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
         
-        # Get last known data
-        if not X.empty:
-            last_row = X.iloc[-1].copy()
+        # Train Random Forest
+        rf = RandomForestRegressor(n_estimators=200, max_depth=10, random_state=42)
+        rf.fit(X_train, y_train)
+        y_pred_rf = rf.predict(X_test)
+        
+        # Train XGBoost
+        xg = xgb.XGBRegressor(n_estimators=100, learning_rate=0.1, max_depth=5, random_state=42)
+        xg.fit(X_train, y_train)
+        y_pred_xg = xg.predict(X_test)
+        
+        # Select Best Model
+        r2_rf = r2_score(y_test, y_pred_rf)
+        r2_xg = r2_score(y_test, y_pred_xg)
+        
+        if r2_rf > r2_xg:
+            best_model = rf
+            best_name = "Random Forest"
+            y_pred = y_pred_rf
+            best_r2 = r2_rf
         else:
-            st.warning("Training data is empty. Cannot generate defaults.")
-            last_row = pd.Series(0, index=features)
+            best_model = xg
+            best_name = "XGBoost"
+            y_pred = y_pred_xg
+            best_r2 = r2_xg
 
+    # --- DASHBOARD ---
+    col1, col2, col3 = st.columns(3)
+    col1.metric("🏆 Best Model", best_name)
+    col2.metric("Accuracy (R²)", f"{best_r2:.2%}")
+    col3.metric("Avg Error (MAE)", f"₱{mean_absolute_error(y_test, y_pred):.2f}")
     
-    # --- INPUT FORM ---
-    st.subheader("Scenario Inputs")
+    st.subheader("📊 Forecast vs. Actual (Test Set)")
+    chart_data = pd.DataFrame({
+        'Actual Spending': y_test.values,
+        'Predicted Spending': y_pred
+    })
+    st.line_chart(chart_data)
+    
+    st.subheader("🔮 Demand Simulator")
+    st.info("Enter economic data to predict clothing spending for the **next quarter**.")
+    
+    # Get last known data for defaults
+    if not X.empty:
+        last_row = X.iloc[-1]
+        last_val_infl = float(last_row['Inflation_Rate']) if 'Inflation_Rate' in last_row else 5.0
+        last_val_ccis = float(last_row['CCIS_Overall']) if 'CCIS_Overall' in last_row else -10.0
+        last_val_lag = float(last_row['HFCE_Lag1']) if 'HFCE_Lag1' in last_row else 1500.0
+    else:
+        last_val_infl = 5.0
+        last_val_ccis = -10.0
+        last_val_lag = 1500.0
+
     with st.form("prediction_form"):
-        # Use last historical values as starting point for consistent forecasting
-        val_infl = float(last_row.get('Inflation_Rate', 5.0))
-        val_ccis = float(last_row.get('CCIS_Overall', -10.0))
-        
-        st.caption("Enter your expected economic outlook for the **target quarter**:")
         c1, c2, c3 = st.columns(3)
-        in_infl = c1.number_input("Inflation Rate (%)", value=val_infl, step=0.1, key="i_infl")
-        in_ccis = c2.number_input("Consumer Confidence Index", value=val_ccis, step=0.1, key="i_ccis")
-        q_select = c3.selectbox("Target Quarter", ["Q1 (Jan-Mar)", "Q2 (Apr-Jun)", "Q3 (Jul-Sep)", "Q4 (Oct-Dec)"], key="i_qtr")
-
-        st.subheader("Historical Context (Required for Stable Forecasting)")
-        st.caption("The model needs these previous spending figures to predict the trend accurately.")
-        c4, c5, c6 = st.columns(3)
+        in_infl = c1.number_input("Inflation Rate (%)", value=last_val_infl, step=0.1)
+        in_ccis = c2.number_input("Consumer Confidence Index", value=last_val_ccis, step=0.1)
+        in_lag1 = c3.number_input("Prev Quarter Spending (₱)", value=last_val_lag, step=50.0)
         
-        # Historical Input Fields (Guiding the user with last known good values)
-        in_lag1 = c4.number_input("Prev Quarter Spending (₱)", value=float(last_row.get('HFCE_Lag1', 1500.0)), step=50.0, key="i_lag1")
-        in_lag4 = c5.number_input("Last Year's Spending (₱)", value=float(last_row.get('HFCE_Lag4', 1500.0)), step=50.0, key="i_lag4")
-        in_roll4 = c6.number_input("Last 4 Qtr Avg (₱)", value=float(last_row.get('RollingMean_4', 1500.0)), step=50.0, key="i_roll4")
-
+        q_select = st.selectbox("Target Quarter", ["Q1 (Jan-Mar)", "Q2 (Apr-Jun)", "Q3 (Jul-Sep)", "Q4 (Oct-Dec)"])
         submit = st.form_submit_button("🚀 Predict Demand")
     
     if submit:
-        # Construct input vector based on existing features
+        # Construct input
         input_vector = last_row.copy()
         
-        # Update inputs
+        # Update available fields safely
         if 'Inflation_Rate' in input_vector: input_vector['Inflation_Rate'] = in_infl
         if 'CCIS_Overall' in input_vector: input_vector['CCIS_Overall'] = in_ccis
-        
-        # Update Lag Features
         if 'HFCE_Lag1' in input_vector: input_vector['HFCE_Lag1'] = in_lag1
-        if 'HFCE_Lag4' in input_vector: input_vector['HFCE_Lag4'] = in_lag4
-        if 'RollingMean_4' in input_vector: input_vector['RollingMean_4'] = in_roll4
-
-        # Calculate Growth Rates for prediction input
-        if 'Inflation_Rate' in last_row:
-            prev_infl = last_row['Inflation_Rate']
-            input_vector['Inflation_Growth'] = (in_infl - prev_infl) / prev_infl if prev_infl != 0 else 0
-        
-        if 'CCIS_Overall' in last_row:
-            prev_ccis = last_row['CCIS_Overall']
-            input_vector['CCIS_Growth'] = (in_ccis - prev_ccis) / prev_ccis if prev_ccis != 0 else 0
         
         # Set Seasonality
-        q_map = {'Q1 (Jan-Mar)': 'Q1', 'Q2 (Apr-Jun)': 'Q2', 'Q3 (Jul-Sep)': 'Q3', 'Q4 (Oct-Dec)': 'Q4'}
-        selected_q = q_map[q_select]
+        input_vector['Quarter_Q1'] = 1 if "Q1" in q_select else 0
+        input_vector['Quarter_Q2'] = 1 if "Q2" in q_select else 0
+        input_vector['Quarter_Q3'] = 1 if "Q3" in q_select else 0
+        input_vector['Quarter_Q4'] = 1 if "Q4" in q_select else 0
         
-        for q in ['Q1', 'Q2', 'Q3', 'Q4']:
-            col_name = f"Quarter_{q}"
-            if col_name in input_vector:
-                input_vector[col_name] = 1 if q == selected_q else 0
-        
-        # Fix any resulting NaNs from the growth calculation (e.g., if prev value was 0)
-        input_vector.fillna(0, inplace=True)
-        
-        # Final prediction
-        pred = rf.predict(pd.DataFrame([input_vector.drop(labels=['HFCE_Lag2', 'RollingMean_2'], errors='ignore')]))[0]
+        pred = best_model.predict(pd.DataFrame([input_vector]))[0]
         
         st.markdown("---")
+        st.success(f"### 🎯 Forecast: **₱{pred:,.2f}** per person")
         
-        # --- SHOW PREVIOUS VS PREDICTED ---
-        col_prev, col_curr = st.columns(2)
+        # Contextual Insight
+        pct_change = ((pred - in_lag1) / in_lag1) * 100
+        st.caption(f"This represents a **{pct_change:+.1f}%** change from the previous quarter.")
         
-        # Previous Quarter is defined by the user input for Lag1
-        prev_spending = in_lag1
-        
-        # Calculation
-        pct_change = ((pred - prev_spending) / prev_spending) * 100
-        
-        col_prev.metric("Previous Quarter (Baseline)", f"₱{prev_spending:,.2f}")
-        
-        col_curr.metric("🎯 Forecasted Spending", f"₱{pred:,.2f}", f"{pct_change:+.1f}%")
-        
-        st.success(f"**Action Insight:** Demand is forecasted to {'increase' if pct_change > 0 else 'decrease'} by **{abs(pct_change):.1f}%** in the upcoming {q_select}.")
-        st.caption("Note: Prediction made using the Random Forest Regressor trained on 2007-2023 data.")
+    # Feature Importance Plot
+    st.markdown("---")
+    st.subheader(f"🔍 Feature Importance ({best_name})")
+    importance = pd.DataFrame({
+        'Feature': features,
+        'Importance': best_model.feature_importances_
+    }).sort_values(by='Importance', ascending=True)
+    
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.barh(importance['Feature'], importance['Importance'], color='teal')
+    ax.set_xlabel("Importance Score")
+    st.pyplot(fig)
 
 else:
-    st.error("Data loading or processing failed. Please ensure all CSV files are correctly named and located.")
+    st.error("Data load failed. Please check CSV files.")
