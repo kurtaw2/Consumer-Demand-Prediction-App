@@ -63,7 +63,7 @@ def extract_ces_indicator(current_dir, file_name, search_term, col_name):
         if search_term == 'ROW_0_fallback':
             for idx in range(quarter_row_idx + 1, min(quarter_row_idx + 50, len(df_raw))):
                 try:
-                    # Check 3rd column (index 2) usually has data
+                    # Check 3rd column (index 2) usually holds Q1 data
                     test_val = str(df_raw.iloc[idx, 2]).replace(',', '').strip()
                     if test_val and test_val.lower() != 'nan':
                         float(test_val)
@@ -216,6 +216,7 @@ if hfce is not None:
         y = df[target]
         
         # --- FINAL DATA CLEANING SAFEGUARD ---
+        # Ensure absolutely all data passed to model is numeric
         for col in X.columns:
             if X[col].dtype == object:
                 X[col] = X[col].astype(str).str.replace(',', '')
@@ -229,32 +230,39 @@ if hfce is not None:
         X = combined[features]
         y = combined[target]
         
-        # Train Random Forest
-        rf = RandomForestRegressor(n_estimators=200, max_depth=10, random_state=42)
+        # Train Random Forest (We don't need GridSearchCV here for speed)
+        rf = RandomForestRegressor(n_estimators=200, max_depth=10, min_samples_split=5, min_samples_leaf=2, random_state=42)
         rf.fit(X, y)
         
         # Get last known data
-        last_row = X.iloc[-1]
+        if not X.empty:
+            last_row = X.iloc[-1].copy()
+        else:
+            st.warning("Training data is empty. Cannot generate defaults.")
+            last_row = pd.Series(0, index=features)
+
     
     # --- INPUT FORM ---
+    st.subheader("Scenario Inputs")
     with st.form("prediction_form"):
-        c1, c2, c3 = st.columns(3)
+        # Use last historical values as starting point for consistent forecasting
         val_infl = float(last_row.get('Inflation_Rate', 5.0))
         val_ccis = float(last_row.get('CCIS_Overall', -10.0))
-        val_lag = float(last_row.get('HFCE_Lag1', 1500.0))
-        val_lag4 = float(last_row.get('HFCE_Lag4', 1500.0)) 
-        val_roll4 = float(last_row.get('RollingMean_4', 1500.0))
-
-        in_infl = c1.number_input("Expected Inflation Rate (%)", value=val_infl, step=0.1)
-        in_ccis = c2.number_input("Expected Consumer Confidence", value=val_ccis, step=0.1)
         
-        q_select = c3.selectbox("Target Quarter", ["Q1 (Jan-Mar)", "Q2 (Apr-Jun)", "Q3 (Jul-Sep)", "Q4 (Oct-Dec)"])
+        st.caption("Enter your expected economic outlook for the **target quarter**:")
+        c1, c2, c3 = st.columns(3)
+        in_infl = c1.number_input("Inflation Rate (%)", value=val_infl, step=0.1, key="i_infl")
+        in_ccis = c2.number_input("Consumer Confidence Index", value=val_ccis, step=0.1, key="i_ccis")
+        q_select = c3.selectbox("Target Quarter", ["Q1 (Jan-Mar)", "Q2 (Apr-Jun)", "Q3 (Jul-Sep)", "Q4 (Oct-Dec)"], key="i_qtr")
 
-        st.subheader("Historical Inputs")
+        st.subheader("Historical Context (Required for Stable Forecasting)")
+        st.caption("The model needs these previous spending figures to predict the trend accurately.")
         c4, c5, c6 = st.columns(3)
-        in_lag1 = c4.number_input("Prev Quarter Spending (₱)", value=val_lag, step=50.0)
-        in_lag4 = c5.number_input("Last Year's Spending (₱)", value=val_lag4, step=50.0)
-        in_roll4 = c6.number_input("Last 4 Qtr Avg (₱)", value=val_roll4, step=50.0)
+        
+        # Historical Input Fields (Guiding the user with last known good values)
+        in_lag1 = c4.number_input("Prev Quarter Spending (₱)", value=float(last_row.get('HFCE_Lag1', 1500.0)), step=50.0, key="i_lag1")
+        in_lag4 = c5.number_input("Last Year's Spending (₱)", value=float(last_row.get('HFCE_Lag4', 1500.0)), step=50.0, key="i_lag4")
+        in_roll4 = c6.number_input("Last 4 Qtr Avg (₱)", value=float(last_row.get('RollingMean_4', 1500.0)), step=50.0, key="i_roll4")
 
         submit = st.form_submit_button("🚀 Predict Demand")
     
@@ -270,27 +278,48 @@ if hfce is not None:
         if 'HFCE_Lag1' in input_vector: input_vector['HFCE_Lag1'] = in_lag1
         if 'HFCE_Lag4' in input_vector: input_vector['HFCE_Lag4'] = in_lag4
         if 'RollingMean_4' in input_vector: input_vector['RollingMean_4'] = in_roll4
+
+        # Calculate Growth Rates for prediction input
+        if 'Inflation_Rate' in last_row:
+            prev_infl = last_row['Inflation_Rate']
+            input_vector['Inflation_Growth'] = (in_infl - prev_infl) / prev_infl if prev_infl != 0 else 0
+        
+        if 'CCIS_Overall' in last_row:
+            prev_ccis = last_row['CCIS_Overall']
+            input_vector['CCIS_Growth'] = (in_ccis - prev_ccis) / prev_ccis if prev_ccis != 0 else 0
         
         # Set Seasonality
+        q_map = {'Q1 (Jan-Mar)': 'Q1', 'Q2 (Apr-Jun)': 'Q2', 'Q3 (Jul-Sep)': 'Q3', 'Q4 (Oct-Dec)': 'Q4'}
+        selected_q = q_map[q_select]
+        
         for q in ['Q1', 'Q2', 'Q3', 'Q4']:
             col_name = f"Quarter_{q}"
             if col_name in input_vector:
-                input_vector[col_name] = 1 if q in q_select else 0
+                input_vector[col_name] = 1 if q == selected_q else 0
         
-        # Predict
-        pred = rf.predict(pd.DataFrame([input_vector]))[0]
+        # Fix any resulting NaNs from the growth calculation (e.g., if prev value was 0)
+        input_vector.fillna(0, inplace=True)
+        
+        # Final prediction
+        pred = rf.predict(pd.DataFrame([input_vector.drop(labels=['HFCE_Lag2', 'RollingMean_2'], errors='ignore')]))[0]
         
         st.markdown("---")
         
-        # --- NEW: SHOW PREVIOUS VS PREDICTED ---
+        # --- SHOW PREVIOUS VS PREDICTED ---
         col_prev, col_curr = st.columns(2)
         
-        col_prev.metric("Previous Quarter (Input)", f"₱{in_lag1:,.2f}")
+        # Previous Quarter is defined by the user input for Lag1
+        prev_spending = in_lag1
         
-        pct_change = ((pred - in_lag1) / in_lag1) * 100
-        col_curr.metric("Forecasted Quarter", f"₱{pred:,.2f}", f"{pct_change:+.1f}%")
+        # Calculation
+        pct_change = ((pred - prev_spending) / prev_spending) * 100
         
-        st.caption(f"Demand is forecasted to {'increase' if pct_change > 0 else 'decrease'} by {abs(pct_change):.1f}% compared to the previous period.")
+        col_prev.metric("Previous Quarter (Baseline)", f"₱{prev_spending:,.2f}")
+        
+        col_curr.metric("🎯 Forecasted Spending", f"₱{pred:,.2f}", f"{pct_change:+.1f}%")
+        
+        st.success(f"**Action Insight:** Demand is forecasted to {'increase' if pct_change > 0 else 'decrease'} by **{abs(pct_change):.1f}%** in the upcoming {q_select}.")
+        st.caption("Note: Prediction made using the Random Forest Regressor trained on 2007-2023 data.")
 
 else:
-    st.error("Data load failed. Please check CSV files.")
+    st.error("Data loading or processing failed. Please ensure all CSV files are correctly named and located.")
