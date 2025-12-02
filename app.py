@@ -17,7 +17,6 @@ st.markdown("""
 """)
 
 # --- Configuration ---
-# Assumes files are in the same directory as app.py
 DATA_FOLDER = '.' 
 FILES = {
     'hfce': os.path.join(DATA_FOLDER, 'HFCE_data.csv'),
@@ -106,7 +105,6 @@ def extract_ces_indicator(file_path, indicator_search_term, new_column_name):
 def train_model():
     """
     Loads data, cleans it, performs feature engineering, and trains the model.
-    Returns the trained model and the list of feature columns expected.
     """
     # 1. Load Files
     try:
@@ -132,11 +130,9 @@ def train_model():
         year_map[col_idx + 1] = current_year
     
     # Map Quarters
-    row_indices = []
     years = []
     quarters = []
     vals = []
-    
     quarter_names = ['Q1', 'Q2', 'Q3', 'Q4']
     
     for i, row in hfce_target.iterrows():
@@ -328,9 +324,28 @@ if submit_btn:
             """)
 
 elif model:
-    # Optional: Show Feature Importance when no prediction is made yet
+    # 5. "About" Section (Default view when no prediction is active)
     st.markdown("---")
-    with st.expander("See what drives this model"):
-        st.write("Top 5 factors influencing the prediction:")
-        feat_imp = pd.Series(model.feature_importances_, index=feature_cols).sort_values(ascending=False).head(5)
-        st.bar_chart(feat_imp, color="#FF4B4B")
+    st.subheader("ℹ️ About this Project")
+    
+    st.markdown("""
+    This application leverages machine learning to forecast **Household Final Consumption Expenditure (HFCE)** specifically for the **Clothing and Footwear** sector in the Philippines. 
+    
+    By analyzing historical relationships between economic indicators and consumer behavior, the model estimates discretionary spending patterns.
+    """)
+    
+    col_info1, col_info2 = st.columns(2)
+    
+    with col_info1:
+        st.markdown("**📊 Data Sources:**")
+        st.markdown("""
+        * **Spending Data:** PSA (Philippine Statistics Authority)
+        * **Consumer Sentiment:** BSP (Bangko Sentral ng Pilipinas) Consumer Expectations Survey
+        * **Inflation & Population:** PSA
+        """)
+        
+    with col_info2:
+        st.markdown("**🧠 Methodology:**")
+        st.markdown("""
+        The model uses **XGBoost (Extreme Gradient Boosting)**, a robust machine learning algorithm, to identify non-linear correlations between inflation, financial outlook, and consumption.
+        """)
