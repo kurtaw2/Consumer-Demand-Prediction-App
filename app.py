@@ -238,25 +238,23 @@ if hfce is not None:
     
     # --- INPUT FORM ---
     with st.form("prediction_form"):
-        st.subheader("Current Economic Outlook")
-        
-        # Get safe defaults based on available features
+        c1, c2, c3 = st.columns(3)
         val_infl = float(last_row.get('Inflation_Rate', 5.0))
         val_ccis = float(last_row.get('CCIS_Overall', -10.0))
         val_lag = float(last_row.get('HFCE_Lag1', 1500.0))
-        val_lag4 = float(last_row.get('HFCE_Lag4', 1500.0)) # New input needed
-        val_roll4 = float(last_row.get('RollingMean_4', 1500.0)) # New input needed
+        val_lag4 = float(last_row.get('HFCE_Lag4', 1500.0)) 
+        val_roll4 = float(last_row.get('RollingMean_4', 1500.0))
 
-        c1, c2, c3 = st.columns(3)
-        in_infl = c1.number_input("Expected Inflation Rate (%)", value=val_infl, step=0.1, help="Higher inflation typically reduces discretionary spending.")
-        in_ccis = c2.number_input("Expected Consumer Confidence Index", value=val_ccis, step=0.1, help="Positive index means better outlook on economy.")
-        q_select = c3.selectbox("Target Quarter", ["Q1 (Jan-Mar)", "Q2 (Apr-Jun)", "Q3 (Jul-Sep)", "Q4 (Oct-Dec)"], help="This sets the seasonality.")
+        in_infl = c1.number_input("Expected Inflation Rate (%)", value=val_infl, step=0.1)
+        in_ccis = c2.number_input("Expected Consumer Confidence", value=val_ccis, step=0.1)
+        
+        q_select = c3.selectbox("Target Quarter", ["Q1 (Jan-Mar)", "Q2 (Apr-Jun)", "Q3 (Jul-Sep)", "Q4 (Oct-Dec)"])
 
-        st.subheader("Historical Context (Required for Trend)")
+        st.subheader("Historical Inputs")
         c4, c5, c6 = st.columns(3)
-        in_lag1 = c4.number_input("Prev Quarter Spending (₱)", value=val_lag, step=50.0, help="Spending value from 3 months ago (Q-1).")
-        in_lag4 = c5.number_input("Last Year's Spending (₱)", value=val_lag4, step=50.0, help="Spending value from 12 months ago (Q-4).")
-        in_roll4 = c6.number_input("Last 4 Qtr Avg Spending (₱)", value=val_roll4, step=50.0, help="Average spending over the last 4 quarters (Rolling Mean).")
+        in_lag1 = c4.number_input("Prev Quarter Spending (₱)", value=val_lag, step=50.0)
+        in_lag4 = c5.number_input("Last Year's Spending (₱)", value=val_lag4, step=50.0)
+        in_roll4 = c6.number_input("Last 4 Qtr Avg (₱)", value=val_roll4, step=50.0)
 
         submit = st.form_submit_button("🚀 Predict Demand")
     
@@ -268,7 +266,7 @@ if hfce is not None:
         if 'Inflation_Rate' in input_vector: input_vector['Inflation_Rate'] = in_infl
         if 'CCIS_Overall' in input_vector: input_vector['CCIS_Overall'] = in_ccis
         
-        # Update Lag Features (Crucial for Prediction Stability)
+        # Update Lag Features
         if 'HFCE_Lag1' in input_vector: input_vector['HFCE_Lag1'] = in_lag1
         if 'HFCE_Lag4' in input_vector: input_vector['HFCE_Lag4'] = in_lag4
         if 'RollingMean_4' in input_vector: input_vector['RollingMean_4'] = in_roll4
@@ -283,11 +281,16 @@ if hfce is not None:
         pred = rf.predict(pd.DataFrame([input_vector]))[0]
         
         st.markdown("---")
-        st.success(f"### 🎯 Forecast: **₱{pred:,.2f}** per person")
         
-        # Contextual Insight
+        # --- NEW: SHOW PREVIOUS VS PREDICTED ---
+        col_prev, col_curr = st.columns(2)
+        
+        col_prev.metric("Previous Quarter (Input)", f"₱{in_lag1:,.2f}")
+        
         pct_change = ((pred - in_lag1) / in_lag1) * 100
-        st.caption(f"This represents a **{pct_change:+.1f}%** change from the previous quarter.")
+        col_curr.metric("Forecasted Quarter", f"₱{pred:,.2f}", f"{pct_change:+.1f}%")
+        
+        st.caption(f"Demand is forecasted to {'increase' if pct_change > 0 else 'decrease'} by {abs(pct_change):.1f}% compared to the previous period.")
 
 else:
     st.error("Data load failed. Please check CSV files.")
