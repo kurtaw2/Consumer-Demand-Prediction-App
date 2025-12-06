@@ -3,13 +3,13 @@ import pandas as pd
 import numpy as np
 import joblib
 import os
-import xgboost as xgb # Required to load the XGBRegressor model structure
+import xgboost as xgb 
 
 # --- Configuration ---
-# This matches the folder name defined in train_and_save.py
-MODEL_OUTPUT_FOLDER = 'HFCE_Predictor_Artifacts' 
+# DYNAMIC FOLDER DETECTION
+found_folders = [d for d in os.listdir('.') if os.path.isdir(d) and d.startswith('HFCE_Predictor_Artifacts')]
+MODEL_OUTPUT_FOLDER = sorted(found_folders)[-1] if found_folders else 'HFCE_Predictor_Artifacts'
 
-# Define the local paths to the model artifacts
 MODEL_DIR = os.path.join(os.getcwd(), MODEL_OUTPUT_FOLDER)
 PREDICTOR_FILENAME = 'hfce_predictor.joblib'
 FEATURES_FILENAME = 'hfce_features.joblib'
@@ -19,7 +19,7 @@ MODEL_EXPORT_PATH = os.path.join(MODEL_DIR, PREDICTOR_FILENAME)
 FEATURES_EXPORT_PATH = os.path.join(MODEL_DIR, FEATURES_FILENAME)
 DEFAULTS_EXPORT_PATH = os.path.join(MODEL_DIR, DEFAULTS_FILENAME)
 
-# Fallback defaults in case the defaults file is missing
+# Fallback defaults
 DEFAULT_VALUES_FALLBACK = {
     'HFCE_Per_Capita': 15000.00,
     'HFCE_Lag1': 15000.00,
@@ -32,158 +32,154 @@ DEFAULT_VALUES_FALLBACK = {
     'Year': 2025
 }
 
-# --- Data Loading (Cached) ---
+# --- Data Loading ---
 @st.cache_resource
 def load_predictor():
-    """Loads the trained model, feature list, and dynamic defaults from the local repository."""
-    
-    model = None
     feature_cols = None
     defaults = DEFAULT_VALUES_FALLBACK.copy()
+    model = None
 
-    # 1. Check if directory exists
     if not os.path.exists(MODEL_DIR):
-        st.error(f"❌ Error: Model directory not found at: {MODEL_DIR}")
-        st.warning(f"Please run 'train_and_save.py' first to generate the '{MODEL_OUTPUT_FOLDER}' folder.")
+        st.error(f"❌ Error: Model directory '{MODEL_OUTPUT_FOLDER}' not found.")
         return None, None, defaults
 
     try:
-        # 2. Load the artifacts
         model = joblib.load(MODEL_EXPORT_PATH)
         feature_cols = joblib.load(FEATURES_EXPORT_PATH)
-
-        # 3. Try to load dynamic defaults
         if os.path.exists(DEFAULTS_EXPORT_PATH):
-            dynamic_defaults = joblib.load(DEFAULTS_EXPORT_PATH)
-            defaults.update(dynamic_defaults)
-        
+            defaults.update(joblib.load(DEFAULTS_EXPORT_PATH))
         return model, feature_cols, defaults
-        
-    except FileNotFoundError:
-        st.error(f"❌ Critical files missing inside '{MODEL_OUTPUT_FOLDER}'. Ensure .joblib files exist.")
-        return None, None, defaults
     except Exception as e:
-        st.error(f"❌ Error loading model artifacts: {e}")
+        st.error(f"❌ Error loading model: {e}")
         return None, None, defaults
 
-# --- Application UI ---
-st.set_page_config(page_title="HFCE Prediction Tool", layout="wide")
+# --- UI Setup ---
+st.set_page_config(page_title="Future Textile Demand Forecaster", layout="wide")
 
-st.title("👕 HFCE Clothing Consumption Predictor")
+# Custom CSS to match the dark theme aesthetics better
 st.markdown("""
-**Forecast Tool:** Predicts **Household Final Consumption Expenditure (Per Capita)** for Clothing & Footwear
-based on economic indicators and historical consumption patterns.
+<style>
+    .big-font { font-size:24px !important; font-weight: bold; }
+    .metric-value { font-size: 36px; font-weight: bold; color: #4CAF50; }
+    .metric-delta { font-size: 16px; color: #FF5252; }
+</style>
+""", unsafe_allow_html=True)
+
+st.title("🔮 Future Textile Demand Forecaster")
+st.markdown("""
+Predict Per-Capita Clothing Spending based on economic indicators. Enter your economic outlook below 
+to forecast demand for the next quarter.
 """)
 
-# Load Model
-with st.spinner("Loading model from local artifacts..."):
-    model, feature_cols, dynamic_defaults = load_predictor()
+# Load Resources
+with st.spinner("Initializing forecaster..."):
+    model, feature_cols, defaults = load_predictor()
 
 if model is None:
-    st.stop() # Stop execution if model failed to load
+    st.stop()
 
-# Extract Defaults for UI
-def_spending = dynamic_defaults.get('HFCE_Per_Capita')
-def_lag1 = dynamic_defaults.get('HFCE_Lag1')
-def_lag2 = dynamic_defaults.get('HFCE_Lag2')
-def_lag4 = dynamic_defaults.get('HFCE_Lag4')
-def_year = dynamic_defaults.get('Year')
-
-# --- Input Form ---
-st.markdown("---")
+# --- INPUT SECTION ---
 with st.form("prediction_form"):
-    st.info(f"💡 **Baseline:** Defaults are populated using the most recent data (Year {def_year}).")
-
-    st.subheader("1. Timeframe")
-    c1, c2 = st.columns(2)
-    with c1:
-        input_year = st.number_input("Target Year", min_value=2024, max_value=2030, value=int(def_year + 1))
-    with c2:
-        input_qtr = st.selectbox("Target Quarter", ["Q1", "Q2", "Q3", "Q4"])
-
-    st.subheader("2. Economic Indicators")
-    ec1, ec2, ec3 = st.columns(3)
-    val_ccis = ec1.number_input("Consumer Confidence (CCIS)", value=dynamic_defaults.get('CCIS_Overall'))
-    val_fin = ec2.number_input("Financial Condition Index", value=dynamic_defaults.get('CES_FinCondition'))
-    val_inc = ec3.number_input("Income Outlook Index", value=dynamic_defaults.get('CES_Income'))
-
-    st.subheader("3. Inflation Metrics")
-    i1, i2 = st.columns(2)
-    val_inf_curr = i1.number_input("Inflation Rate (Target Qtr) %", value=dynamic_defaults.get('Inflation_Annual_Static_Rate'))
-    val_inf_prev = i2.number_input("Inflation Rate (Previous Qtr) %", value=dynamic_defaults.get('Inflation_Annual_Static_Rate'), help="Required to calculate inflation growth rate.")
-
-    st.subheader("4. Historical Consumption (Pesos)")
-    st.caption("Enter the per capita spending for previous quarters to establish the trend.")
-    h1, h2, h3 = st.columns(3)
-    lag1 = h1.number_input("Last Qtr (Lag 1)", value=def_lag1, format="%.2f")
-    lag2 = h2.number_input("2 Qtrs Ago (Lag 2)", value=def_lag2, format="%.2f")
-    lag4 = h3.number_input("1 Year Ago (Lag 4)", value=def_lag4, format="%.2f")
-
-    submit_btn = st.form_submit_button("🚀 Generate Prediction", type="primary")
-
-# --- Prediction Logic ---
-if submit_btn:
-    # 1. Prepare Raw Inputs
-    input_data = {}
     
-    # Direct mappings
+    # Row 1: Economic Indicators
+    c1, c2, c3 = st.columns(3)
+    
+    with c1:
+        val_inf = st.number_input("Expected Inflation Rate (%)", value=defaults.get('Inflation_Annual_Static_Rate'), step=0.1)
+    
+    with c2:
+        val_ccis = st.number_input("Expected Consumer Confidence", value=defaults.get('CCIS_Overall'), step=1.0)
+    
+    with c3:
+        # Simplified Quarter Selection
+        q_map = {"Q1 (Jan-Mar)": "Q1", "Q2 (Apr-Jun)": "Q2", "Q3 (Jul-Sep)": "Q3", "Q4 (Oct-Dec)": "Q4"}
+        q_display = st.selectbox("Target Quarter", list(q_map.keys()))
+        input_qtr = q_map[q_display]
+
+    st.markdown("### Historical Inputs")
+    
+    # Row 2: Historical Data
+    h1, h2, h3 = st.columns(3)
+    
+    with h1:
+        lag1 = st.number_input("Prev Quarter Spending (₱)", value=defaults.get('HFCE_Lag1'), format="%.2f")
+    
+    with h2:
+        lag4 = st.number_input("Last Year's Spending (₱)", value=defaults.get('HFCE_Lag4'), format="%.2f")
+        
+    with h3:
+        # Pre-calculate a default rolling mean for display
+        default_rolling = (defaults.get('HFCE_Lag1') + defaults.get('HFCE_Lag2') + defaults.get('HFCE_Lag4')*2)/4
+        user_rolling = st.number_input("Last 4 Qtr Avg (₱)", value=default_rolling, format="%.2f")
+
+    # --- Hidden / Background Inputs (Required by Model) ---
+    # These use defaults since we removed them from the UI to clean it up
+    input_year = int(defaults.get('Year') + 1)
+    val_fin = defaults.get('CES_FinCondition')
+    val_inc = defaults.get('CES_Income')
+    val_inf_prev = defaults.get('Inflation_Annual_Static_Rate') # Assume stable inflation for growth calc
+    lag2 = defaults.get('HFCE_Lag2') # Hidden Lag 2
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    submit = st.form_submit_button("🚀 Predict Demand", type="primary")
+
+# --- Logic & Output ---
+if submit:
+    # 1. Prepare Data
+    input_data = {}
     input_data['Year'] = input_year
     input_data['CCIS_Overall'] = val_ccis
     input_data['CES_FinCondition'] = val_fin
     input_data['CES_Income'] = val_inc
-    input_data['Inflation_Annual_Static_Rate'] = val_inf_curr
+    input_data['Inflation_Annual_Static_Rate'] = val_inf
+    
     input_data['HFCE_Lag1'] = lag1
     input_data['HFCE_Lag2'] = lag2
     input_data['HFCE_Lag4'] = lag4
     
-    # Feature Engineering (Must mimic train_and_save.py logic)
-    input_data['HFCE_RollingMean_2'] = (lag1 + lag2) / 2
-    # Approx for 4-quarter rolling mean (Lag1+Lag2+Lag4+Lag4)/4 as we lack Lag3 input
-    input_data['HFCE_RollingMean_4'] = (lag1 + lag2 + lag4 + lag4) / 4 
+    # Logic: If user manually changes Rolling Mean, we respect that input
+    # Otherwise, the model would normally calculate it. Here we inject the user input.
+    input_data['HFCE_RollingMean_4'] = user_rolling
+    input_data['HFCE_RollingMean_2'] = (lag1 + lag2) / 2 # Still needs Lag2, using default
     
-    # Growth Rates
-    input_data['Inflation_Growth'] = (val_inf_curr - val_inf_prev) / val_inf_prev if val_inf_prev != 0 else 0
-    input_data['CCIS_Growth'] = 0.0 # Defaulting to 0 as we don't ask for previous CCIS
-    
-    # One-Hot Encoding for Quarter
+    input_data['Inflation_Growth'] = (val_inf - val_inf_prev) / val_inf_prev if val_inf_prev != 0 else 0
+    input_data['CCIS_Growth'] = 0.0
+
     input_data['Quarter_Q2'] = 1 if input_qtr == 'Q2' else 0
     input_data['Quarter_Q3'] = 1 if input_qtr == 'Q3' else 0
     input_data['Quarter_Q4'] = 1 if input_qtr == 'Q4' else 0
-    
-    # 2. Align with Model Features
-    # Create DF from input
+
+    # 2. Align & Predict
     df_input = pd.DataFrame([input_data])
-    
-    # Create empty DF with correct feature columns (loaded from joblib)
     df_final = pd.DataFrame(0, index=[0], columns=feature_cols)
-    
-    # Map input values to the correct columns
     for col in feature_cols:
         if col in df_input.columns:
             df_final.loc[0, col] = df_input.loc[0, col]
             
-    # Ensure float types
-    df_final = df_final.astype(float)
-        
-    # 3. Predict
     try:
-        prediction = model.predict(df_final)[0]
+        prediction = model.predict(df_final.astype(float))[0]
         
-        # Display Results
-        st.markdown("### 📊 Prediction Results")
-        res_col1, res_col2 = st.columns([1, 2])
+        # 3. Custom Output Display (Matching Screenshot)
+        st.markdown("---")
         
-        delta_value = ((prediction - lag1) / lag1) * 100
+        r1, r2 = st.columns(2)
         
-        with res_col1:
-            st.metric(
-                label="Predicted Spending (Per Capita)", 
-                value=f"₱ {prediction:,.2f}",
-                delta=f"{delta_value:+.2f}% vs Last Qtr"
-            )
-        with res_col2:
-            st.success(f"Forecast: **₱{prediction:,.2f}**")
-            st.info("This prediction uses the specific economic conditions and consumption trends you provided.")
+        with r1:
+            st.markdown("Previous Quarter (Input)")
+            st.markdown(f"<div class='metric-value'>₱{lag1:,.2f}</div>", unsafe_allow_html=True)
             
+        with r2:
+            st.markdown("Forecasted Quarter")
+            st.markdown(f"<div class='metric-value'>₱{prediction:,.2f}</div>", unsafe_allow_html=True)
+            
+            # Calculate Percentage Change
+            pct_change = ((prediction - lag1) / lag1) * 100
+            color = "#FF5252" if pct_change < 0 else "#4CAF50"
+            st.markdown(f"<div style='color: {color}; font-weight: bold; background-color: #262730; padding: 4px 8px; border-radius: 4px; display: inline-block;'>{pct_change:+.1f}%</div>", unsafe_allow_html=True)
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        direction = "increase" if pct_change > 0 else "decrease"
+        st.info(f"Demand is forecasted to **{direction}** by **{abs(pct_change):.1f}%** compared to the previous period.")
+
     except Exception as e:
-        st.error(f"Prediction Error: {e}")
+        st.error(f"Prediction failed: {e}")
