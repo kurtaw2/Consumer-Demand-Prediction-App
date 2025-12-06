@@ -257,6 +257,38 @@ if submit:
                  max_diff = inf_sensitivity_df['Diff from Baseline'].abs().max()
                  st.info(f"ℹ️ Inflation Impact: A swing from 2% to 12% inflation changes the forecast by up to ₱{max_diff:,.2f}.")
 
+            # 3. Consumer Confidence (CCIS) Sensitivity Check
+            st.write("### Consumer Confidence Sensitivity Check")
+            st.write("Impact of changing Consumer Confidence Index (CCIS) (holding other inputs constant):")
+
+            ccis_test_rows = []
+            # Test range from pessimistic (-25) to optimistic (+25)
+            ccis_values = [-25.0, -15.0, -5.0, 5.0, 15.0, 25.0]
+
+            for ccis_val in ccis_values:
+                row = df_final.copy()
+                # Update CCIS Overall
+                row['CCIS_Overall'] = ccis_val
+                # Note: CCIS_Growth is kept at 0.0 as per the main logic assumption
+                ccis_test_rows.append(row)
+
+            ccis_test_df = pd.concat(ccis_test_rows, ignore_index=True)
+            ccis_test_preds = model.predict(ccis_test_df.astype(float)) * scaling_factor
+
+            ccis_sensitivity_df = pd.DataFrame({
+                "CCIS Index": ccis_values,
+                "Forecast (₱)": ccis_test_preds,
+                "Diff from Baseline": ccis_test_preds - final_prediction
+            })
+
+            st.dataframe(ccis_sensitivity_df.style.format({"Forecast (₱)": "{:,.2f}", "Diff from Baseline": "{:+,.2f}", "CCIS Index": "{:.1f}"}))
+
+            if ccis_sensitivity_df['Forecast (₱)'].nunique() == 1:
+                st.warning("⚠️ The model is not sensitive to Consumer Confidence changes in this range. Historical lag features may be dominating the prediction.")
+            else:
+                max_ccis_diff = ccis_sensitivity_df['Diff from Baseline'].abs().max()
+                st.info(f"ℹ️ CCIS Impact: A swing in confidence from -25 to +25 changes the forecast by up to ₱{max_ccis_diff:,.2f}.")
+
             st.write("### Raw Model Input")
             st.dataframe(df_final)
 
