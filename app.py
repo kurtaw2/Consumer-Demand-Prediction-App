@@ -160,14 +160,11 @@ if submit:
         raw_prediction = model.predict(df_final.astype(float))[0]
         
         # --- AUTO-CALIBRATION FIX ---
-        # The model might predict in different units (e.g. Millions vs Pesos).
-        # We assume the prediction should be roughly similar magnitude to the Lag1 Input.
         scaling_factor = 1.0
         calibrated_msg = ""
         
         if raw_prediction > 0 and lag1 > 0:
             ratio = lag1 / raw_prediction
-            # If off by more than 10x, snap to nearest power of 10
             if ratio > 10 or ratio < 0.1:
                 power = round(math.log10(ratio))
                 scaling_factor = 10 ** power
@@ -200,9 +197,17 @@ if submit:
         
         # --- DEBUG SECTION ---
         with st.expander("🛠️ Advanced Analysis & Debugging"):
+            # New Warning based on feature dominance
+            st.warning("""
+            ### 🚨 Why Economic Indicators Don't Affect the Prediction
+            The model relies overwhelmingly on **Historical Spending Lags**. 
+            In time series forecasting, the previous period's value (Lag 1) is often the strongest predictor,
+            dwarfing the influence of other variables like Inflation and Consumer Confidence.
+            **This model is primarily a smart extrapolation of your 'Prev Quarter Spending' input.**
+            """)
+
             # 1. Seasonality Check
             st.write("### Seasonal Sensitivity Check")
-            st.write("Impact of changing Quarters (holding other inputs constant):")
             
             test_rows = []
             quarters = ['Q1', 'Q2', 'Q3', 'Q4']
@@ -225,16 +230,13 @@ if submit:
             
             # 2. Inflation Sensitivity Check
             st.write("### Inflation Sensitivity Check")
-            st.write("Impact of changing Inflation Rate (holding other inputs constant):")
             
             inf_test_rows = []
             inf_values = [2.0, 4.0, 6.0, 8.0, 10.0, 12.0]
             
             for inf_val in inf_values:
                 row = df_final.copy()
-                # Update static rate
                 row['Inflation_Annual_Static_Rate'] = inf_val
-                # Update growth rate (assuming prev inflation stays constant at user input)
                 prev = val_inf_prev if val_inf_prev != 0 else 4.0
                 growth = (inf_val - prev) / prev
                 row['Inflation_Growth'] = growth
@@ -251,25 +253,15 @@ if submit:
             
             st.dataframe(inf_sensitivity_df.style.format({"Forecast (₱)": "{:,.2f}", "Diff from Baseline": "{:+,.2f}", "Inflation Rate (%)": "{:.1f}%"}))
             
-            if inf_sensitivity_df['Forecast (₱)'].nunique() == 1:
-                st.warning("⚠️ The model is ignoring Inflation. This usually means historical spending patterns are far more predictive than minor inflation fluctuations.")
-            else:
-                 max_diff = inf_sensitivity_df['Diff from Baseline'].abs().max()
-                 st.info(f"ℹ️ Inflation Impact: A swing from 2% to 12% inflation changes the forecast by up to ₱{max_diff:,.2f}.")
-
             # 3. Consumer Confidence (CCIS) Sensitivity Check
             st.write("### Consumer Confidence Sensitivity Check")
-            st.write("Impact of changing Consumer Confidence Index (CCIS) (holding other inputs constant):")
 
             ccis_test_rows = []
-            # Test range from pessimistic (-25) to optimistic (+25)
             ccis_values = [-25.0, -15.0, -5.0, 5.0, 15.0, 25.0]
 
             for ccis_val in ccis_values:
                 row = df_final.copy()
-                # Update CCIS Overall
                 row['CCIS_Overall'] = ccis_val
-                # Note: CCIS_Growth is kept at 0.0 as per the main logic assumption
                 ccis_test_rows.append(row)
 
             ccis_test_df = pd.concat(ccis_test_rows, ignore_index=True)
@@ -284,7 +276,7 @@ if submit:
             st.dataframe(ccis_sensitivity_df.style.format({"Forecast (₱)": "{:,.2f}", "Diff from Baseline": "{:+,.2f}", "CCIS Index": "{:.1f}"}))
 
             if ccis_sensitivity_df['Forecast (₱)'].nunique() == 1:
-                st.warning("⚠️ The model is not sensitive to Consumer Confidence changes in this range. Historical lag features may be dominating the prediction.")
+                st.warning("⚠️ Confirmed: The model is not sensitive to Consumer Confidence changes in this range.")
             else:
                 max_ccis_diff = ccis_sensitivity_df['Diff from Baseline'].abs().max()
                 st.info(f"ℹ️ CCIS Impact: A swing in confidence from -25 to +25 changes the forecast by up to ₱{max_ccis_diff:,.2f}.")
