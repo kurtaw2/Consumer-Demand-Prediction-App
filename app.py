@@ -198,12 +198,12 @@ if submit:
 
         st.markdown("<br>", unsafe_allow_html=True)
         
-        # --- SEASONALITY CHECKER (To prove quarters work) ---
+        # --- DEBUG SECTION ---
         with st.expander("🛠️ Advanced Analysis & Debugging"):
+            # 1. Seasonality Check
             st.write("### Seasonal Sensitivity Check")
-            st.write("Does changing the quarter affect the prediction? (Holding other values constant)")
+            st.write("Impact of changing Quarters (holding other inputs constant):")
             
-            # Create a test batch for all 4 quarters
             test_rows = []
             quarters = ['Q1', 'Q2', 'Q3', 'Q4']
             for q in quarters:
@@ -223,10 +223,39 @@ if submit:
             })
             st.dataframe(sensitivity_df.style.format({"Forecast (₱)": "{:,.2f}", "Diff from Avg": "{:+,.2f}"}))
             
-            if sensitivity_df['Forecast (₱)'].nunique() == 1:
-                st.warning("⚠️ The model is not reacting to Quarter changes. This usually means 'Lagged Consumption' is overwhelmingly the dominant feature, washing out seasonal effects.")
+            # 2. Inflation Sensitivity Check
+            st.write("### Inflation Sensitivity Check")
+            st.write("Impact of changing Inflation Rate (holding other inputs constant):")
+            
+            inf_test_rows = []
+            inf_values = [2.0, 4.0, 6.0, 8.0, 10.0, 12.0]
+            
+            for inf_val in inf_values:
+                row = df_final.copy()
+                # Update static rate
+                row['Inflation_Annual_Static_Rate'] = inf_val
+                # Update growth rate (assuming prev inflation stays constant at user input)
+                prev = val_inf_prev if val_inf_prev != 0 else 4.0
+                growth = (inf_val - prev) / prev
+                row['Inflation_Growth'] = growth
+                inf_test_rows.append(row)
+            
+            inf_test_df = pd.concat(inf_test_rows, ignore_index=True)
+            inf_test_preds = model.predict(inf_test_df.astype(float)) * scaling_factor
+            
+            inf_sensitivity_df = pd.DataFrame({
+                "Inflation Rate (%)": inf_values,
+                "Forecast (₱)": inf_test_preds,
+                "Diff from Baseline": inf_test_preds - final_prediction
+            })
+            
+            st.dataframe(inf_sensitivity_df.style.format({"Forecast (₱)": "{:,.2f}", "Diff from Baseline": "{:+,.2f}", "Inflation Rate (%)": "{:.1f}%"}))
+            
+            if inf_sensitivity_df['Forecast (₱)'].nunique() == 1:
+                st.warning("⚠️ The model is ignoring Inflation. This usually means historical spending patterns are far more predictive than minor inflation fluctuations.")
             else:
-                st.success(f"✅ Seasonality Detected: The model adjusts the forecast by up to ₱{sensitivity_df['Diff from Avg'].abs().max():,.2f} based on the quarter.")
+                 max_diff = inf_sensitivity_df['Diff from Baseline'].abs().max()
+                 st.info(f"ℹ️ Inflation Impact: A swing from 2% to 12% inflation changes the forecast by up to ₱{max_diff:,.2f}.")
 
             st.write("### Raw Model Input")
             st.dataframe(df_final)
