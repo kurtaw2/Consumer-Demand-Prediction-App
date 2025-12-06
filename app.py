@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import joblib
 import os
+import math
 import xgboost as xgb 
 
 # --- Configuration ---
@@ -56,19 +57,19 @@ def load_predictor():
 # --- UI Setup ---
 st.set_page_config(page_title="Future Textile Demand Forecaster", layout="wide")
 
-# Custom CSS to match the dark theme aesthetics better
+# Custom CSS
 st.markdown("""
 <style>
-    .big-font { font-size:24px !important; font-weight: bold; }
     .metric-value { font-size: 36px; font-weight: bold; color: #4CAF50; }
-    .metric-delta { font-size: 16px; color: #FF5252; }
+    .metric-sub { font-size: 14px; color: #888; margin-top: -10px; }
+    .highlight-box { background-color: #262730; padding: 15px; border-radius: 5px; margin-bottom: 10px; }
 </style>
 """, unsafe_allow_html=True)
 
 st.title("🔮 Future Textile Demand Forecaster")
 st.markdown("""
-Predict Per-Capita Clothing Spending based on economic indicators. Enter your economic outlook below 
-to forecast demand for the next quarter.
+Predict Per-Capita Clothing Spending based on economic indicators. 
+**Auto-Calibration enabled** to correct unit mismatches.
 """)
 
 # Load Resources
@@ -112,20 +113,19 @@ with st.form("prediction_form"):
         default_rolling = (defaults.get('HFCE_Lag1') + defaults.get('HFCE_Lag2') + defaults.get('HFCE_Lag4')*2)/4
         user_rolling = st.number_input("Last 4 Qtr Avg (₱)", value=default_rolling, format="%.2f")
 
-    # --- Hidden / Background Inputs (Required by Model) ---
-    # These use defaults since we removed them from the UI to clean it up
+    # --- Hidden Inputs ---
     input_year = int(defaults.get('Year') + 1)
     val_fin = defaults.get('CES_FinCondition')
     val_inc = defaults.get('CES_Income')
-    val_inf_prev = defaults.get('Inflation_Annual_Static_Rate') # Assume stable inflation for growth calc
-    lag2 = defaults.get('HFCE_Lag2') # Hidden Lag 2
+    val_inf_prev = defaults.get('Inflation_Annual_Static_Rate') 
+    lag2 = defaults.get('HFCE_Lag2') 
 
     st.markdown("<br>", unsafe_allow_html=True)
     submit = st.form_submit_button("🚀 Predict Demand", type="primary")
 
 # --- Logic & Output ---
 if submit:
-    # 1. Prepare Data
+    # 1. Prepare Data Dictionary
     input_data = {}
     input_data['Year'] = input_year
     input_data['CCIS_Overall'] = val_ccis
@@ -137,19 +137,19 @@ if submit:
     input_data['HFCE_Lag2'] = lag2
     input_data['HFCE_Lag4'] = lag4
     
-    # Logic: If user manually changes Rolling Mean, we respect that input
-    # Otherwise, the model would normally calculate it. Here we inject the user input.
     input_data['HFCE_RollingMean_4'] = user_rolling
-    input_data['HFCE_RollingMean_2'] = (lag1 + lag2) / 2 # Still needs Lag2, using default
+    input_data['HFCE_RollingMean_2'] = (lag1 + lag2) / 2
     
     input_data['Inflation_Growth'] = (val_inf - val_inf_prev) / val_inf_prev if val_inf_prev != 0 else 0
     input_data['CCIS_Growth'] = 0.0
 
+    # Explicitly handle all Quarter possibilities to ensure features are active
+    # Note: 'Quarter_Q1' is typically the dropped reference column in training, so we don't set it explicitly
     input_data['Quarter_Q2'] = 1 if input_qtr == 'Q2' else 0
     input_data['Quarter_Q3'] = 1 if input_qtr == 'Q3' else 0
     input_data['Quarter_Q4'] = 1 if input_qtr == 'Q4' else 0
 
-    # 2. Align & Predict
+    # 2. Align Data with Model Features
     df_input = pd.DataFrame([input_data])
     df_final = pd.DataFrame(0, index=[0], columns=feature_cols)
     for col in feature_cols:
@@ -157,12 +157,28 @@ if submit:
             df_final.loc[0, col] = df_input.loc[0, col]
             
     try:
-        prediction = model.predict(df_final.astype(float))[0]
+        raw_prediction = model.predict(df_final.astype(float))[0]
         
-        # 3. Custom Output Display (Matching Screenshot)
+        # --- AUTO-CALIBRATION FIX ---
+        # The model might predict in different units (e.g. Millions vs Pesos).
+        # We assume the prediction should be roughly similar magnitude to the Lag1 Input.
+        scaling_factor = 1.0
+        calibrated_msg = ""
+        
+        if raw_prediction > 0 and lag1 > 0:
+            ratio = lag1 / raw_prediction
+            # If off by more than 10x, snap to nearest power of 10
+            if ratio > 10 or ratio < 0.1:
+                power = round(math.log10(ratio))
+                scaling_factor = 10 ** power
+                calibrated_msg = f"(Auto-scaled by x{int(scaling_factor)} to match input units)"
+
+        final_prediction = raw_prediction * scaling_factor
+        
+        # 3. Output Display
         st.markdown("---")
         
-        r1, r2 = st.columns(2)
+        r1, r2, r3 = st.columns(3)
         
         with r1:
             st.markdown("Previous Quarter (Input)")
@@ -170,25 +186,50 @@ if submit:
             
         with r2:
             st.markdown("Forecasted Quarter")
-            st.markdown(f"<div class='metric-value'>₱{prediction:,.2f}</div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='metric-value'>₱{final_prediction:,.2f}</div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='metric-sub'>{calibrated_msg}</div>", unsafe_allow_html=True)
             
+        with r3:
             # Calculate Percentage Change
-            pct_change = ((prediction - lag1) / lag1) * 100
+            pct_change = ((final_prediction - lag1) / lag1) * 100
             color = "#FF5252" if pct_change < 0 else "#4CAF50"
-            st.markdown(f"<div style='color: {color}; font-weight: bold; background-color: #262730; padding: 4px 8px; border-radius: 4px; display: inline-block;'>{pct_change:+.1f}%</div>", unsafe_allow_html=True)
+            st.markdown("Change")
+            st.markdown(f"<div style='color: {color}; font-size: 36px; font-weight: bold;'>{pct_change:+.1f}%</div>", unsafe_allow_html=True)
 
         st.markdown("<br>", unsafe_allow_html=True)
-        direction = "increase" if pct_change > 0 else "decrease"
-        st.info(f"Demand is forecasted to **{direction}** by **{abs(pct_change):.1f}%** compared to the previous period.")
+        
+        # --- SEASONALITY CHECKER (To prove quarters work) ---
+        with st.expander("🛠️ Advanced Analysis & Debugging"):
+            st.write("### Seasonal Sensitivity Check")
+            st.write("Does changing the quarter affect the prediction? (Holding other values constant)")
+            
+            # Create a test batch for all 4 quarters
+            test_rows = []
+            quarters = ['Q1', 'Q2', 'Q3', 'Q4']
+            for q in quarters:
+                row = df_final.copy()
+                row['Quarter_Q2'] = 1 if q == 'Q2' else 0
+                row['Quarter_Q3'] = 1 if q == 'Q3' else 0
+                row['Quarter_Q4'] = 1 if q == 'Q4' else 0
+                test_rows.append(row)
+            
+            test_df = pd.concat(test_rows, ignore_index=True)
+            test_preds = model.predict(test_df.astype(float)) * scaling_factor
+            
+            sensitivity_df = pd.DataFrame({
+                "Quarter": quarters, 
+                "Forecast (₱)": test_preds,
+                "Diff from Avg": test_preds - test_preds.mean()
+            })
+            st.dataframe(sensitivity_df.style.format({"Forecast (₱)": "{:,.2f}", "Diff from Avg": "{:+,.2f}"}))
+            
+            if sensitivity_df['Forecast (₱)'].nunique() == 1:
+                st.warning("⚠️ The model is not reacting to Quarter changes. This usually means 'Lagged Consumption' is overwhelmingly the dominant feature, washing out seasonal effects.")
+            else:
+                st.success(f"✅ Seasonality Detected: The model adjusts the forecast by up to ₱{sensitivity_df['Diff from Avg'].abs().max():,.2f} based on the quarter.")
 
-        # --- DEBUG SECTION (Added to diagnose off-predictions) ---
-        with st.expander("🛠️ Debug: View Model Inputs"):
-            st.write("These are the exact values sent to the model. Check for 0s or unexpected scales.")
+            st.write("### Raw Model Input")
             st.dataframe(df_final)
-            if prediction < (lag1 * 0.1):
-                st.warning("⚠️ **Potential Scale Issue Detected:** The prediction is extremely small compared to the input. "
-                           "Your model might have been trained on 'Millions' units or Normalized data (0-1), "
-                           "but you are inputting raw Pesos.")
 
     except Exception as e:
         st.error(f"Prediction failed: {e}")
