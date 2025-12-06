@@ -181,5 +181,14 @@ if submit:
         direction = "increase" if pct_change > 0 else "decrease"
         st.info(f"Demand is forecasted to **{direction}** by **{abs(pct_change):.1f}%** compared to the previous period.")
 
+        # --- DEBUG SECTION (Added to diagnose off-predictions) ---
+        with st.expander("🛠️ Debug: View Model Inputs"):
+            st.write("These are the exact values sent to the model. Check for 0s or unexpected scales.")
+            st.dataframe(df_final)
+            if prediction < (lag1 * 0.1):
+                st.warning("⚠️ **Potential Scale Issue Detected:** The prediction is extremely small compared to the input. "
+                           "Your model might have been trained on 'Millions' units or Normalized data (0-1), "
+                           "but you are inputting raw Pesos.")
+
     except Exception as e:
         st.error(f"Prediction failed: {e}")
