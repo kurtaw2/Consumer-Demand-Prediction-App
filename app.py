@@ -22,10 +22,10 @@ DEFAULTS_EXPORT_PATH = os.path.join(MODEL_DIR, DEFAULTS_FILENAME)
 
 # Fallback defaults
 DEFAULT_VALUES_FALLBACK = {
-    'HFCE_Per_Capita': 15000.00,
-    'HFCE_Lag1': 15000.00,
-    'HFCE_Lag2': 14500.00,
-    'HFCE_Lag4': 16000.00,
+    'HFCE_Per_Capita': 1000.00,
+    'HFCE_Lag1': 1500.00,
+    'HFCE_Lag2': 1400.00,
+    'HFCE_Lag4': 1600.00,
     'CCIS_Overall': 10.0,
     'CES_FinCondition': 20.0,
     'CES_Income': 30.0,
